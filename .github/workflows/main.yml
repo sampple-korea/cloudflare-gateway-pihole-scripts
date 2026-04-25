@@ -1,0 +1,74 @@
+name: Update Cloudflare Gateway Adblock
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cgps:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout CGPS
+        uses: actions/checkout@v6
+        with:
+          repository: mrrfv/cloudflare-gateway-pihole-scripts
+          ref: v1
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Download allowlists
+        run: npm run download:allowlist
+        env:
+          ALLOWLIST_URLS: ${{ vars.ALLOWLIST_URLS }}
+
+      - name: Build blocklist from AdGuard-style filters
+        shell: bash
+        env:
+          ADGUARD_FILTER_URLS: |
+            https://filters.adtidy.org/android/filters/15_optimized.txt
+            https://cdn.jsdelivr.net/gh/adguardteam/HostlistsRegistry@main/assets/filter_25.txt
+        run: |
+          : > raw-adguard.txt
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            curl -fsSL "$url" >> raw-adguard.txt
+            printf '\n' >> raw-adguard.txt
+          done <<< "$ADGUARD_FILTER_URLS"
+
+          tr '\r\t ' '\n\n\n' < raw-adguard.txt |
+            sed -nE 's/^\|\|([^\/\^\$:@]+).*/\1/p' |
+            tr '[:upper:]' '[:lower:]' |
+            sed 's/\.$//' |
+            awk '
+              $0 !~ /\*/ &&
+              $0 !~ /^[0-9]+(\.[0-9]+){3}$/ &&
+              $0 ~ /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{1,62}$/ {
+                print
+              }
+            ' |
+            sort -u > blocklist.txt
+
+          echo "Generated blocklist:"
+          wc -l blocklist.txt
+
+      - name: Create or update Cloudflare Gateway lists and rule
+        run: npm run cloudflare-create
+        env:
+          BLOCK_PAGE_ENABLED: ${{ vars.BLOCK_PAGE_ENABLED }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_LIST_ITEM_LIMIT: ${{ secrets.CLOUDFLARE_LIST_ITEM_LIMIT }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
